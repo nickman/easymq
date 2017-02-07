@@ -1,0 +1,34 @@
+{
+	"poolconfig" : {
+	  "lifo": true,
+	  "fairness": false,
+	  "maxWaitMillis": -1,
+	  "minEvictableIdleTimeMillis": 1800000,
+	  "softMinEvictableIdleTimeMillis": 1800000,
+	  "numTestsPerEvictionRun": 3,
+	  "evictionPolicyClassName": "org.apache.commons.pool2.impl.DefaultEvictionPolicy",
+	  "testOnCreate": false,
+	  "testOnBorrow": false,
+	  "testOnReturn": false,
+	  "testWhileIdle": false,
+	  "timeBetweenEvictionRunsMillis": -1,
+	  "blockWhenExhausted": true,
+	  "jmxEnabled": true,
+	  "jmxNamePrefix": "pool",
+	  "jmxNameBase": null,
+	  "minIdlePerKey": 0,
+	  "maxIdlePerKey": 8,
+	  "maxTotalPerKey": 8,
+	  "maxTotal": -1
+	},
+	"pools" : [
+		{
+			"name" : "mq8",
+			"host" : "192.168.1.13",
+			"port" : 1414,
+			"channel" : "SYSTEM.DEF.SVRCONN",
+			"pcfwait" : 5,
+			"pcfexpiry" : 5			
+		}
+	]
+}
