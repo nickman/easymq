@@ -12,8 +12,6 @@
 // see <http://www.gnu.org/licenses/>.
 package com.heliosapm.easymq;
 
-import java.io.Closeable;
-import java.io.IOException;
 import java.lang.ref.WeakReference;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
@@ -21,18 +19,18 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
-import java.util.Hashtable;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 
 import javax.jms.Message;
-import javax.jms.MessageConsumer;
 import javax.jms.MessageListener;
-import javax.jms.Session;
 import javax.servlet.http.HttpSessionBindingEvent;
 import javax.servlet.http.HttpSessionBindingListener;
+import javax.xml.bind.DatatypeConverter;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,16 +40,17 @@ import com.codahale.metrics.Gauge;
 import com.heliosapm.easymq.commands.QueueAttribute;
 import com.heliosapm.easymq.commands.SubscriptionAttribute;
 import com.heliosapm.easymq.commands.TopicAttribute;
-import com.ibm.mq.MQQueueManager;
+import com.heliosapm.easymq.http.HttpServer;
+import com.heliosapm.easymq.pool.PCFMessageAgentWrapper;
+import com.heliosapm.easymq.pool.PoolManager;
+import com.heliosapm.easymq.pool.SubPool;
 import com.ibm.mq.constants.CMQC;
 import com.ibm.mq.constants.CMQCFC;
-import com.ibm.mq.constants.MQConstants;
 import com.ibm.mq.pcf.MQCFBS;
 import com.ibm.mq.pcf.MQCFIL;
 import com.ibm.mq.pcf.MQCFIN;
 import com.ibm.mq.pcf.MQCFST;
 import com.ibm.mq.pcf.PCFMessage;
-import com.ibm.mq.pcf.PCFMessageAgent;
 import com.ibm.mq.pcf.PCFParameter;
 
 /**
@@ -62,17 +61,13 @@ import com.ibm.mq.pcf.PCFParameter;
  * <p><code>com.heliosapm.easymq.MQ</code></p>
  */
 
-public class MQ implements Closeable, MessageListener, HttpSessionBindingListener {
-	/** The MQ PCF agent */
-	protected final PCFMessageAgent pcf;
-	/** The MQ QueueManager */
-	protected final MQQueueManager qmanager;
-	
-	
-	/** The listener MQ session */
-	protected final Session listenerSession;
-	/** The MQ message consumer */
-	protected final MessageConsumer consumer;
+public class MQ implements MessageListener, HttpSessionBindingListener {
+	/** The pcf pool key */
+	protected final String poolKey;
+	/** The pcf pool key as json */
+	protected final String poolKeyJson;	
+	/** The pool name */
+	protected final String poolName;
 	
 	/** The queue manager name */
 	protected final String queueManager;
@@ -82,29 +77,18 @@ public class MQ implements Closeable, MessageListener, HttpSessionBindingListene
 	protected final String channel;
 	/** The MQ host listening port */
 	protected final int port;
-	/** Indicates if we should lisen on the outbound port */
-	protected final boolean listen;
-	
+	/** A reference to the pool manager */
+	protected final PoolManager poolManager;
+	/** Instance logger */
 	protected final Logger logger = LoggerFactory.getLogger(getClass());
 	
+	/** A serial number for auto generated pool names */
+	private static final AtomicLong autoPoolNameSerial = new AtomicLong(0L);
 	
-	/** The default MQ Queue Manager name */
-	public static final String DEFAULT_QUEUE_MAN_NAME = "MQMGR";
-	/** The config key for the connection channel name */
-	public static final String CONFIG_CHANNEL_NAME = "channel";
-	/** The default connection channel name */
-	public static final String DEFAULT_CHANNEL_NAME = "SVRCONN";	
-	/** The config key for the MQ server host name */
-	public static final String CONFIG_MQ_HOST = "server.host";
-	/** The config key for the MQ server port */
-	public static final String CONFIG_MQ_PORT = "server.port";
-	/** The default MQ server port */
-	public static final int DEFAULT_MQ_PORT = 1430;
+	/** All MQ instances keyed by key */
+	private static final ConcurrentHashMap<String, MQ> instances = new ConcurrentHashMap<String, MQ>(32, 0.75f, Runtime.getRuntime().availableProcessors()); 
 	
-	/** The config key for the connection channel name */
-	public static final String CONFIG_LISTEN = "listen";
-	/** The default connection channel name */
-	public static final boolean DEFAULT_LISTEN = false;	
+	
 
 	/** The pattern for admin queue names */
 	public static final Pattern NON_ADMIN_QUEUES = Pattern.compile("SYSTEM\\..*||AMQ\\..*", Pattern.CASE_INSENSITIVE);
@@ -114,24 +98,28 @@ public class MQ implements Closeable, MessageListener, HttpSessionBindingListene
 	
 	public static void main(String[] args) {
 		log("MQTest");
-		System.setProperty("mq.config", "mq.properties");
-//		final MQ mq = new MQ(new File("./src/test/resources/working"));
-//		final Map<String, String> queueNames = mq.getQueueNames(NON_ADMIN_QUEUES, null); 
-//		log("Queues:" + queueNames.keySet());
-//		final Map<String, String> topicNames = mq.getTopicNames(NON_ADMIN_TOPICS, null); 
-//		log("Topics:" + topicNames.keySet());
-//		for(String name: topicNames.values()) {
-//			final Map<String, byte[]> subInfo = mq.getTopicSubscriptions(name.trim());
-//			log("Subs for [" + name.trim() + "]:" + subInfo);
-//			if(subInfo.isEmpty()) continue;
-//			for(String sname : subInfo.keySet()) {
-//				try {
-//					log("Sub Status for [" + sname.trim() + "]:" + printSubscriptionAttributes(mq.subscriptionAttrs(sname)));
-//				} catch (Exception x) {
-//					x.printStackTrace(System.err);
-//				}
-//			}
-//		}
+		HttpServer.getInstance();
+		final MQ mq1 = MQ.getInstance("192.168.1.13", 1414, "SYSTEM.DEF.SVRCONN");
+		final MQ mq = MQ.getInstance("mq8");
+		log("Same:" + (mq1==mq));
+		
+		final Map<String, String> queueNames = mq.getQueueNames(NON_ADMIN_QUEUES, null); 
+		log("Queues:" + queueNames.keySet());
+		final Map<String, String> topicNames = mq.getTopicNames(NON_ADMIN_TOPICS, null); 
+		log("Topics:" + topicNames.keySet());
+		for(String name: topicNames.values()) {
+			final Map<String, byte[]> subInfo = mq.getTopicSubscriptions(name.trim());
+			log("Subs for [" + name.trim() + "]:" + subInfo);
+			if(subInfo.isEmpty()) continue;
+			for(String sname : subInfo.keySet()) {
+				try {
+					log("Sub Status for [" + sname.trim() + "]:" + printSubscriptionAttributes(mq.subscriptionAttrs(sname)));
+				} catch (Exception x) {
+					x.printStackTrace(System.err);
+				}
+			}			
+		}
+		try { Thread.currentThread().join(); } catch (Exception x) {}
 	}
 	
 	public static void log(final Object msg) {
@@ -139,56 +127,124 @@ public class MQ implements Closeable, MessageListener, HttpSessionBindingListene
 	}
 	
 	/**
-	 * Creates a new connected MQ instance for admin only
-	 * @param host The MQSeries host
-	 * @param port The MQSeries listening port
-	 * @param channel The MQSeries channel
-	 * @param qmName The MQSeries queue manager name
+	 * Acquires the MQ instance for the passed MQ endpoint
+	 * @param host The MQ host
+	 * @param port The MQ listening port
+	 * @param channel The MQ command channel
+	 * @return the MQ instance
 	 */
-	public MQ(final String host, final int port, final String channel, final String qmName) {
-		listenerSession = null;
-		listen = false;
-		consumer = null;
-		this.queueManager = qmName;
-		this.host = host;			
-		this.channel = channel;
-		this.port = port;		
-//		try {
-//			connectionFactory.setAppName(getClass().getName());
-//			connectionFactory.setDescription("MQ Admin API");
-//			connectionFactory.setHostName(host);
-//			connectionFactory.setPort(port);
-//			connectionFactory.setQueueManager(queueManager);
-//			connectionFactory.setChannel(channel);
-//			connectionFactory.setTransportType(WMQConstants.WMQ_CM_CLIENT);			
-//		} catch (Exception ex) {
-//			throw new RuntimeException("Failed to initialize MQ Connection Factory", ex);
-//		}
-		try {
-			Hashtable<String, Object> env = new Hashtable<String, Object>();
-			env.put(MQConstants.HOST_NAME_PROPERTY, host);
-			env.put(MQConstants.PORT_PROPERTY, port);
-			env.put(MQConstants.CHANNEL_PROPERTY, channel);
-			qmanager = new MQQueueManager(queueManager, env);
-			pcf = new PCFMessageAgent();
-			pcf.connect(qmanager);
-			logger.info("PCFMessageAgent connected to {}@{}:{}", queueManager, host, port);
-		} catch (Exception ex) {
-			throw new RuntimeException("Failed to initialize MQ PCF Message Agent", ex);
+	public static MQ getInstance(final String host, final int port, final String channel) {
+		final String key = PCFMessageAgentWrapper.key(host, port, channel);
+		return getInstanceByKey(key);
+	}
+	
+	/**
+	 * Acquires the MQ instance for the passed key
+	 * @param key The MQ pcf pool key
+	 * @return the MQ instance
+	 */
+	public static MQ getInstanceByKey(final String key) {
+		MQ mq = instances.get(key);
+		if(mq==null) {
+			synchronized(instances) {
+				if(mq==null) {
+					final SubPool subPool = SubPool.fromKey(key);
+					mq = new MQ(subPool.getHost(), subPool.getPort(), subPool.getChannel());
+					instances.put(key, mq);
+				}
+			}
 		}
-//		try {
-//			connection = connectionFactory.createConnection();			
-//			session = connection.createSession(true, Session.AUTO_ACKNOWLEDGE);
-//			producer = session.createProducer(inQueue);
-//			connection.start();
-//			Logger.info("MQ Producer Initialized");
-//		} catch (Exception ex) {
-//			try { close(); } catch (Exception x) {/* No Op */}
-//			throw new RuntimeException("Failed to initialize MQ message producer", ex);
-//		}
+		return mq;		
 	}
 	
 	
+	/**
+	 * Acquires the MQ instance for the named MQ pcf pool.
+	 * If the pool name matches the key pattern, the lookup will be by pool key,
+	 * otherwise it will lookup by pool name
+	 * @param poolName The MQ pcf pool look up value (a key or name)
+	 * @param nullIfNotFound true to return null if instance is not found, false to throw an exception
+	 * @return the MQ instance
+	 */
+	public static MQ getInstance(final String poolName, final boolean nullIfNotFound) {
+		if(poolName==null || poolName.trim().isEmpty()) throw new IllegalArgumentException("The poolName was null or empty");
+		final MQ mq;
+		if(PCFMessageAgentWrapper.KEY_PATTERN.matcher(poolName.trim()).matches()) {
+			mq = getInstanceByKey(poolName.trim());
+		} else {
+			final String key = PoolManager.getInstance().getKeyForName(poolName);
+			if(key==null) {
+				if(nullIfNotFound) return null;
+				throw new RuntimeException("No pool named [" + poolName + "] found");
+			}
+			mq = getInstanceByKey(key);
+		}
+		if(mq==null) {
+			if(nullIfNotFound) return null;
+			throw new RuntimeException("Failed to locate MQ instance for value [" + poolName + "]");
+		}
+		return mq;		
+	}
+	
+	/**
+	 * Acquires the MQ instance for the named MQ pcf pool.
+	 * If the pool name matches the key pattern, the lookup will be by pool key,
+	 * otherwise it will lookup by pool name
+	 * @param poolName The MQ pcf pool look up value (a key or name)
+	 * @return the MQ instance
+	 */
+	public static MQ getInstance(final String poolName) {
+		return getInstance(poolName, false);
+	}
+	
+	
+	/**
+	 * Creates a new connected MQ instance 
+	 * @param host The MQSeries host
+	 * @param port The MQSeries listening port
+	 * @param channel The MQSeries channel
+	 */
+	private MQ(final String host, final int port, final String channel) {
+		this.host = host;
+		this.channel = channel;
+		this.port = port;
+		poolKey = PCFMessageAgentWrapper.key(host, port, channel);
+		poolKeyJson = PCFMessageAgentWrapper.json(host, port, channel);		 
+		poolManager = PoolManager.getInstance();
+		final String tmpPool = poolManager.getNameForKey(poolKey);
+		poolName = tmpPool!=null ? tmpPool : "MQPCFPool#" + autoPoolNameSerial.incrementAndGet(); 
+		PCFMessageAgentWrapper conn = null;
+		try {
+			conn = poolManager.getConnection(poolKey);
+			queueManager = conn.getQManagerName();
+		} finally {
+			if(conn!=null) try { conn.close(); } catch (Exception x) {/* No Op */}
+		}	
+	}
+	
+	/**
+	 * Returns the pool key
+	 * @return the pool key
+	 */
+	public String key() {
+		return poolKey;
+	}
+	
+	/**
+	 * Returns the pool key json
+	 * @return the pool key json
+	 */
+	public String keyJson() {
+		return poolKeyJson;
+	}
+	
+	/**
+	 * Returns the pool name
+	 * @return the pool name
+	 */
+	public String poolName() {
+		return poolName;
+	}
 	
 	
 	
@@ -200,31 +256,20 @@ public class MQ implements Closeable, MessageListener, HttpSessionBindingListene
 	public void onMessage(final Message message) {
 	}
 	
-	/**
-	 * {@inheritDoc}
-	 * @see java.io.Closeable#close()
-	 */
-	@Override
-	public void close() throws IOException {
-//		try { producer.close(); } catch (Exception x) {/* No Op */}
-//		try { session.close(); } catch (Exception x) {/* No Op */}
-//		try { connection.stop(); } catch (Exception x) {/* No Op */}
-//		try { connection.close(); } catch (Exception x) {/* No Op */}
-		try { pcf.disconnect(); }  catch (Exception x) {/* No Op */}		
-		try { qmanager.disconnect(); }  catch (Exception x) {/* No Op */}
-		logger.info("MQ Instance Closed");
-	}
 	
-	
-	protected synchronized PCFMessage[] pcfList(final int commandType, final PCFParameter...params) {
+	protected PCFMessage[] pcfList(final int commandType, final PCFParameter...params) {
+		PCFMessageAgentWrapper conn = null;
 		try {
+			conn = poolManager.getConnection(poolKey);
 			final PCFMessage request = new PCFMessage(commandType);
 			for(PCFParameter p: params) {
 				request.addParameter(p);
 			}
-			return pcf.send(request);
+			return conn.send(request);
 		} catch (Exception ex) {
 			throw new RuntimeException("PCF Exception", ex);
+		} finally {
+			if(conn!=null) try { conn.close(); } catch (Exception x) {/* No Op */}
 		}
 	}
 	
@@ -288,11 +333,17 @@ public class MQ implements Closeable, MessageListener, HttpSessionBindingListene
 			@SuppressWarnings("unchecked")
 			final Map<String, byte[]> subIds = (Map<String, byte[]>)topicAttrs.get(TopicAttribute.SUB_SUBSCRIPTION_ID_BYTES); 
 			
-			final Map<String, byte[]> map = new HashMap<String, byte[]>(subIds.size());
+			final Map<String, byte[]> map = new HashMap<String, byte[]>(subIds.size());			
 			for(byte[] id: subIds.values()) {
 				final PCFMessage[] p = pcfList(CMQCFC.MQCMD_INQUIRE_SUBSCRIPTION,
 					new MQCFBS(CMQCFC.MQBACF_SUB_ID, id));
-					map.put(p[0].getStringParameterValue(CMQCFC.MQCACF_SUB_NAME), id);
+					final String subName = p[0].getStringParameterValue(CMQCFC.MQCACF_SUB_NAME);
+					if(subName==null || subName.trim().isEmpty()) {
+						map.put(DatatypeConverter.printBase64Binary(id), id);
+					} else {
+						map.put(subName, id);
+					}
+					
 			}
 			return map;
 		} catch (Exception ex) {
@@ -549,6 +600,19 @@ public class MQ implements Closeable, MessageListener, HttpSessionBindingListene
 		}
 	}
 	
+	/**
+	 * Determines if this MQ instance has the named topic
+	 * @param topicName The topic name to test for
+	 * @return true if there are one or more topics matching the passed name, false otherwise
+	 */
+	public boolean topicExists(final String topicName) {
+		PCFMessage[] p = pcfList(CMQCFC.MQCMD_INQUIRE_TOPIC, 
+				new MQCFST(CMQC.MQCA_TOPIC_NAME, topicName),
+				new MQCFIL(CMQCFC.MQIACF_TOPIC_ATTRS, new int[]{CMQC.MQCA_TOPIC_STRING})
+			);
+		return p.length != 0;		
+	}
+	
 	public Map<String, String> getTopicNames(final Pattern excludeFilter, final Pattern includeFilter) {
 		PCFMessage[] p = pcfList(CMQCFC.MQCMD_INQUIRE_TOPIC, 
 				new MQCFST(CMQC.MQCA_TOPIC_NAME, "*"),
@@ -640,8 +704,16 @@ public class MQ implements Closeable, MessageListener, HttpSessionBindingListene
 	 */
 	@Override
 	public void valueUnbound(final HttpSessionBindingEvent event) {
-		try { close(); log("MQ Closed on session unbind"); } catch (Exception x) {/* No Op */}
+		try { log("MQ Closed on session unbind"); } catch (Exception x) {/* No Op */}
 	}
-	
+
+	/**
+	 * {@inheritDoc}
+	 * @see java.lang.Object#toString()
+	 */
+	@Override
+	public String toString() {
+		return poolKey + "[" + queueManager + "]";
+	}
 
 }

@@ -122,7 +122,10 @@ public enum TopicAttribute implements AttributeExtractor {
 				b.append(message.getStringParameterValue(CMQCFC.MQCACF_LAST_MSG_DATE))
 					.append(" ")
 					.append(message.getStringParameterValue(CMQCFC.MQCACF_LAST_MSG_TIME));
-				map.put(subId, b.length() >= MQ.DATE_LENGTH ? MQ.fromStringy(b) : null);
+				final String dt = b.toString().trim();
+				if(!dt.isEmpty()) {
+					map.put(subId, MQ.fromStringy(b));
+				}				
 			}
 			return map;
 		}			

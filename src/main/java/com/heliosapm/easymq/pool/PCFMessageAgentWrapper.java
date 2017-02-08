@@ -18,9 +18,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import org.apache.commons.pool2.PooledObject;
-import org.apache.commons.pool2.impl.DefaultPooledObject;
-
 import com.ibm.mq.MQException;
 import com.ibm.mq.pcf.PCFException;
 import com.ibm.mq.pcf.PCFMessage;
@@ -37,12 +34,12 @@ import com.ibm.mq.pcf.PCFMessageAgent;
 public class PCFMessageAgentWrapper implements Closeable {
 	/** The wrapped message agent */
 	private final PCFMessageAgent pcf;
+	/** The queue manager name */
+	private final String queueManagerName;
 	/** The wrapper key */
 	public final String key;
-	/** The pool this message was created for */
-	private final PCFAgentPooledObjectFactory poolFactory;
-	/** The pooled object wrapper for this wrapper */
-	private final PooledObject<PCFMessageAgentWrapper> po;
+	/** Indicates if this wrapper is pooled */
+	private final boolean pooled;
 	/** The key parsing regex */
 	public static final Pattern KEY_PATTERN = Pattern.compile("(.*?)@(.*?):(\\d+)");
 	/** Flag indicating if the pcf expiry has been set */
@@ -50,19 +47,24 @@ public class PCFMessageAgentWrapper implements Closeable {
 	/** The system property to enable or disable pcf message expiry */
 	public static final String PCF_EXPIRY_PROP = "com.ibm.mq.pcf.enablePCFResponseExpiry";
 	
+	/** The default pcf response message expiry in seconds */
+	public static final int DEFAULT_PCF_EXPIRY = 30;
+	/** The default pcf response message wait time in seconds */
+	public static final int DEFAULT_PCF_WAIT = 30;
+	
 	/**
 	 * Creates a new PCFMessageAgentWrapper
 	 * @param host the hostname or IP address where the queue manager resides
 	 * @param port the port on which the queue manager listens for incoming channel connections
 	 * @param channel the client channel to use for the connection
-	 * @param poolFactory The optional pool factory this message agent will be managed by
+	 * @param pooled true if this agent is pooled, false otherwise
 	 */
-	public PCFMessageAgentWrapper(final String host, final int port, final String channel, final PCFAgentPooledObjectFactory poolFactory) {
+	public PCFMessageAgentWrapper(final String host, final int port, final String channel, final boolean pooled) {
 		key = key(host, port, channel);
 		try {
 			pcf = new PCFMessageAgent(host, port, channel);
-			this.poolFactory = poolFactory;
-			po = poolFactory==null ? null : new DefaultPooledObject<PCFMessageAgentWrapper>(this);
+			queueManagerName = pcf.getQManagerName();
+			this.pooled = pooled;
 		} catch (MQException mqex) {
 			throw new RuntimeException(mqex.getMessage(), mqex);
 		}
@@ -75,24 +77,24 @@ public class PCFMessageAgentWrapper implements Closeable {
 	 * @param channel the client channel to use for the connection
 	 */
 	public PCFMessageAgentWrapper(final String host, final int port, final String channel) {
-		this(host, port, channel, null);
+		this(host, port, channel, false);
 	}
 	
 	
 	/**
 	 * Creates a new message agent from the passed key
 	 * @param key The message agent key
-	 * @param poolFactory The optional pool factory this message agent will be managed by
+	 * @param pooled true if this agent is pooled, false otherwise
 	 * @return The created and connected message agent
 	 */
-	public static PCFMessageAgentWrapper fromKey(final String key, final PCFAgentPooledObjectFactory poolFactory) {
+	public static PCFMessageAgentWrapper fromKey(final String key, final boolean pooled) {
 		if(key==null || key.trim().isEmpty()) throw new IllegalArgumentException("The passed key was null or empty");
 		final Matcher m = KEY_PATTERN.matcher(key.trim());
 		if(!m.matches()) throw new IllegalArgumentException("Cannot parse the key [" + key + "]");
 		final String host = m.group(2);
 		final String channel = m.group(1);
 		final int port = Integer.parseInt(m.group(3));
-		return new PCFMessageAgentWrapper(host, port, channel, poolFactory);
+		return new PCFMessageAgentWrapper(host, port, channel, pooled);
 	}
 	
 	/**
@@ -102,7 +104,7 @@ public class PCFMessageAgentWrapper implements Closeable {
 	 * @return The created and connected message agent
 	 */
 	public static PCFMessageAgentWrapper fromKey(final String key) {
-		return fromKey(key, null);
+		return fromKey(key, false);
 	}
 	
 	
@@ -123,7 +125,16 @@ public class PCFMessageAgentWrapper implements Closeable {
 		return new StringBuilder(channel.trim()).append("@").append(host.trim()).append(":").append(port).toString();
 	}
 		
-	
+	/**
+	 * Generates a message agent key in JSON form.
+	 * @param host the hostname or IP address where the queue manager resides
+	 * @param port the port on which the queue manager listens for incoming channel connections
+	 * @param channel the client channel to use for the connection
+	 * @return the key in json format
+	 */
+	public static String json(final String host, final int port, final String channel) {
+		return String.format("{\"host\":\"%s\",\"port\":\"%s\",\"channel\":\"%s\"}", host, port, channel);
+	}
 	/**
 	 * Indicates if the system property to enable pcf message expiry is set to false
 	 * @return true if the expiry property is set to false
@@ -140,13 +151,7 @@ public class PCFMessageAgentWrapper implements Closeable {
 		return "true".equals(System.getProperty(PCF_EXPIRY_PROP));
 	}
 	
-	/**
-	 * Returns the pooled object for this wrapper or null if not pooled
-	 * @return the pooled object
-	 */
-	PooledObject<PCFMessageAgentWrapper> pooledObject() {
-		return po;
-	}
+	
 	
 	/**
 	 * Passivates the message agent if pooled, otherwise calls a hard disconnect
@@ -154,12 +159,8 @@ public class PCFMessageAgentWrapper implements Closeable {
 	 * @see java.io.Closeable#close()
 	 */
 	public void close() throws IOException {
-		if(poolFactory!=null) {
-			try {
-				poolFactory.passivateObject(key, po);
-			} catch (Exception ex) { 
-				throw new IOException("Failed to passivate message agent", ex);
-			}
+		if(pooled) {
+			PoolManager.getInstance().pool.returnObject(key, this);
 		} else {
 			try {
 				pcf.disconnect();
@@ -180,7 +181,15 @@ public class PCFMessageAgentWrapper implements Closeable {
 	 * @return the queue manager
 	 */
 	public String getQManagerName() {
-		return pcf.getQManagerName();
+		return queueManagerName;
+	}
+	
+	/**
+	 * Returns the raw agent
+	 * @return the raw agent
+	 */
+	PCFMessageAgent getRawAgent() {
+		return pcf;
 	}
 
 	/**

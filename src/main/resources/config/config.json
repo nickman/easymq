@@ -7,11 +7,11 @@
 	  "softMinEvictableIdleTimeMillis": 1800000,
 	  "numTestsPerEvictionRun": 3,
 	  "evictionPolicyClassName": "org.apache.commons.pool2.impl.DefaultEvictionPolicy",
-	  "testOnCreate": false,
-	  "testOnBorrow": false,
+	  "testOnCreate": true,
+	  "testOnBorrow": true,
 	  "testOnReturn": false,
-	  "testWhileIdle": false,
-	  "timeBetweenEvictionRunsMillis": -1,
+	  "testWhileIdle": true,
+	  "timeBetweenEvictionRunsMillis": 10000,
 	  "blockWhenExhausted": true,
 	  "jmxEnabled": true,
 	  "jmxNamePrefix": "pool",
@@ -30,5 +30,14 @@
 			"pcfWait" : 5,
 			"pcfExpiry" : 5			
 		}
-	]
+	],
+	"httpServer" : {
+		"port" : 1892,
+		"maxThreads" : 8,
+		"minThreads" : 2,
+		"timeOutMillis" : 30000
+	},
+	"sysprops" : {
+		"com.ibm.mq.pcf.enablePCFResponseExpiry" : true
+	}
 }

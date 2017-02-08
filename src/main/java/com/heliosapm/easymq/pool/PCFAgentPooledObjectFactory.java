@@ -14,6 +14,9 @@ package com.heliosapm.easymq.pool;
 
 import org.apache.commons.pool2.BaseKeyedPooledObjectFactory;
 import org.apache.commons.pool2.PooledObject;
+import org.apache.commons.pool2.impl.DefaultPooledObject;
+
+import com.ibm.mq.pcf.PCFMessageAgent;
 
 /**
  * <p>Title: PCFAgentPooledObjectFactory</p>
@@ -24,14 +27,18 @@ import org.apache.commons.pool2.PooledObject;
  */
 
 public class PCFAgentPooledObjectFactory extends BaseKeyedPooledObjectFactory<String, PCFMessageAgentWrapper> {
-
+	/** Shareable instance */
+	public static final PCFAgentPooledObjectFactory INSTANCE = new PCFAgentPooledObjectFactory();
+	
+	private PCFAgentPooledObjectFactory() {}
+	
 	/**
 	 * {@inheritDoc}
 	 * @see org.apache.commons.pool2.BaseKeyedPooledObjectFactory#create(java.lang.Object)
 	 */
 	@Override
 	public PCFMessageAgentWrapper create(final String key) throws Exception {
-		return PCFMessageAgentWrapper.fromKey(key, this);
+		return PCFMessageAgentWrapper.fromKey(key, true);
 	}
 
 	/**
@@ -39,8 +46,19 @@ public class PCFAgentPooledObjectFactory extends BaseKeyedPooledObjectFactory<St
 	 * @see org.apache.commons.pool2.BaseKeyedPooledObjectFactory#wrap(java.lang.Object)
 	 */
 	@Override
-	public PooledObject<PCFMessageAgentWrapper> wrap(PCFMessageAgentWrapper value) {		
-		return value.pooledObject();
+	public PooledObject<PCFMessageAgentWrapper> wrap(final PCFMessageAgentWrapper value) {		
+		return new DefaultPooledObject<PCFMessageAgentWrapper>(value);
+	}
+	
+	@Override
+	public boolean validateObject(final String key, final PooledObject<PCFMessageAgentWrapper> p) {
+		try {
+			final PCFMessageAgentWrapper wrapper = p.getObject();
+			final PCFMessageAgent agent = wrapper.getRawAgent();
+			return agent.getQManagerName().equals(wrapper.getQManagerName());
+		} catch (Exception ex) {
+			return false;
+		}
 	}
 
 }

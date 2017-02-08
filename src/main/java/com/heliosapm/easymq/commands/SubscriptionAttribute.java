@@ -12,7 +12,6 @@
 // see <http://www.gnu.org/licenses/>.
 package com.heliosapm.easymq.commands;
 
-import java.text.AttributedCharacterIterator;
 import java.util.Collections;
 import java.util.Date;
 import java.util.EnumMap;
