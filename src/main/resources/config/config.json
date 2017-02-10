@@ -39,5 +39,15 @@
 	},
 	"sysprops" : {
 		"com.ibm.mq.pcf.enablePCFResponseExpiry" : true
+	},
+	"cacheconfig" : {
+		"defaultCacheSpec" : "",
+		"jmx" : true,
+		"caches" : {
+			"queues" : "concurrencyLevel=16,initialCapacity=1024,maximumSize=8192,expireAfterWrite=2m",
+			"topics" : "concurrencyLevel=16,initialCapacity=1024,maximumSize=8192,expireAfterWrite=2m",
+			"topicSubs" : "concurrencyLevel=16,initialCapacity=1024,maximumSize=8192,expireAfterWrite=2m",
+			"subnameToSubId" : "concurrencyLevel=16,initialCapacity=1024,maximumSize=8192,expireAfterWrite=2m"
+		}
 	}
 }

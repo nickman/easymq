@@ -12,6 +12,7 @@
 // see <http://www.gnu.org/licenses/>.
 package com.heliosapm.easymq;
 
+import java.lang.management.ManagementFactory;
 import java.lang.ref.WeakReference;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
@@ -21,10 +22,17 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
+import java.util.stream.IntStream;
 
 import javax.jms.Message;
 import javax.jms.MessageListener;
@@ -37,13 +45,14 @@ import org.slf4j.LoggerFactory;
 
 import com.codahale.metrics.CachedGauge;
 import com.codahale.metrics.Gauge;
+import com.heliosapm.easymq.cache.CacheService;
 import com.heliosapm.easymq.commands.QueueAttribute;
 import com.heliosapm.easymq.commands.SubscriptionAttribute;
 import com.heliosapm.easymq.commands.TopicAttribute;
 import com.heliosapm.easymq.http.HttpServer;
 import com.heliosapm.easymq.pool.PCFMessageAgentWrapper;
+import com.heliosapm.easymq.pool.PoolKey;
 import com.heliosapm.easymq.pool.PoolManager;
-import com.heliosapm.easymq.pool.SubPool;
 import com.ibm.mq.constants.CMQC;
 import com.ibm.mq.constants.CMQCFC;
 import com.ibm.mq.pcf.MQCFBS;
@@ -63,7 +72,7 @@ import com.ibm.mq.pcf.PCFParameter;
 
 public class MQ implements MessageListener, HttpSessionBindingListener {
 	/** The pcf pool key */
-	protected final String poolKey;
+	protected final PoolKey poolKey;
 	/** The pcf pool key as json */
 	protected final String poolKeyJson;	
 	/** The pool name */
@@ -80,15 +89,29 @@ public class MQ implements MessageListener, HttpSessionBindingListener {
 	/** A reference to the pool manager */
 	protected final PoolManager poolManager;
 	/** Instance logger */
-	protected final Logger logger = LoggerFactory.getLogger(getClass());
+	protected final Logger log = LoggerFactory.getLogger(getClass());
+	/** The cache service */
+	protected final CacheService cache;
 	
 	/** A serial number for auto generated pool names */
 	private static final AtomicLong autoPoolNameSerial = new AtomicLong(0L);
 	
+	/** The number of CPUs available to this JVM */
+	private static final int CORES = ManagementFactory.getOperatingSystemMXBean().getAvailableProcessors();
+	
 	/** All MQ instances keyed by key */
 	private static final ConcurrentHashMap<String, MQ> instances = new ConcurrentHashMap<String, MQ>(32, 0.75f, Runtime.getRuntime().availableProcessors()); 
 	
-	
+	/** Thread pool for dispatching async and parallel tasks across all MQ instances */
+	private static final ExecutorService threadPool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors(), new ThreadFactory() {
+		final AtomicInteger serial = new AtomicInteger();
+		@Override
+		public Thread newThread(final Runnable r) {
+			final Thread t = new Thread(r, "MQAsyncTask#" + serial.incrementAndGet());
+			t.setDaemon(true);
+			return t;
+		}
+	});
 
 	/** The pattern for admin queue names */
 	public static final Pattern NON_ADMIN_QUEUES = Pattern.compile("SYSTEM\\..*||AMQ\\..*", Pattern.CASE_INSENSITIVE);
@@ -111,14 +134,17 @@ public class MQ implements MessageListener, HttpSessionBindingListener {
 			final Map<String, byte[]> subInfo = mq.getTopicSubscriptions(name.trim());
 			log("Subs for [" + name.trim() + "]:" + subInfo);
 			if(subInfo.isEmpty()) continue;
-			for(String sname : subInfo.keySet()) {
+			for(Map.Entry<String, byte[]> entry : subInfo.entrySet()) {
+				final String sname = entry.getKey();
+				final byte[] subId = entry.getValue();
 				try {
-					log("Sub Status for [" + sname.trim() + "]:" + printSubscriptionAttributes(mq.subscriptionAttrs(sname)));
+					log("Sub Status for [" + sname.trim() + "]:" + printSubscriptionAttributes(mq.subscriptionAttrs(subId)));
 				} catch (Exception x) {
 					x.printStackTrace(System.err);
 				}
 			}			
 		}
+		final Map<QueueAttribute, Object> qattrs = mq.queueAttrs("PRICE.FEED.QUEUE");
 		try { Thread.currentThread().join(); } catch (Exception x) {}
 	}
 	
@@ -134,7 +160,7 @@ public class MQ implements MessageListener, HttpSessionBindingListener {
 	 * @return the MQ instance
 	 */
 	public static MQ getInstance(final String host, final int port, final String channel) {
-		final String key = PCFMessageAgentWrapper.key(host, port, channel);
+		final String key = PoolKey.poolKeyString(host, channel, port);
 		return getInstanceByKey(key);
 	}
 	
@@ -148,8 +174,8 @@ public class MQ implements MessageListener, HttpSessionBindingListener {
 		if(mq==null) {
 			synchronized(instances) {
 				if(mq==null) {
-					final SubPool subPool = SubPool.fromKey(key);
-					mq = new MQ(subPool.getHost(), subPool.getPort(), subPool.getChannel());
+					final PoolKey p = PoolKey.poolKey(key);
+					mq = new MQ(p.host, p.port, p.channel);
 					instances.put(key, mq);
 				}
 			}
@@ -169,7 +195,7 @@ public class MQ implements MessageListener, HttpSessionBindingListener {
 	public static MQ getInstance(final String poolName, final boolean nullIfNotFound) {
 		if(poolName==null || poolName.trim().isEmpty()) throw new IllegalArgumentException("The poolName was null or empty");
 		final MQ mq;
-		if(PCFMessageAgentWrapper.KEY_PATTERN.matcher(poolName.trim()).matches()) {
+		if(PoolKey.matches(poolName.trim())) {
 			mq = getInstanceByKey(poolName.trim());
 		} else {
 			final String key = PoolManager.getInstance().getKeyForName(poolName);
@@ -208,25 +234,46 @@ public class MQ implements MessageListener, HttpSessionBindingListener {
 		this.host = host;
 		this.channel = channel;
 		this.port = port;
-		poolKey = PCFMessageAgentWrapper.key(host, port, channel);
-		poolKeyJson = PCFMessageAgentWrapper.json(host, port, channel);		 
+		poolKey = PoolKey.poolKey(host, channel, port);
+		poolKeyJson = poolKey.toJson();		 
 		poolManager = PoolManager.getInstance();
-		final String tmpPool = poolManager.getNameForKey(poolKey);
+		final String pk = poolKey.toString();
+		final String tmpPool = poolManager.getNameForKey(pk);
 		poolName = tmpPool!=null ? tmpPool : "MQPCFPool#" + autoPoolNameSerial.incrementAndGet(); 
 		PCFMessageAgentWrapper conn = null;
 		try {
-			conn = poolManager.getConnection(poolKey);
+			conn = poolManager.getConnection(pk);
 			queueManager = conn.getQManagerName();
 		} finally {
 			if(conn!=null) try { conn.close(); } catch (Exception x) {/* No Op */}
 		}	
+		cache = CacheService.getInstance();
+		initializeCaches();
+		//cache.put(poolKey.toString(), "queuenames", key, value);
+	}
+	
+	protected void initializeCaches() {
+		// Load queue attributes
+		threadPool.submit(new Runnable(){			
+			public void run() {
+				cache.get(poolKey.toString(), "queues", fetchQueues);
+			}
+		});
+		// Load topic attributes
+		threadPool.submit(new Runnable(){			
+			public void run() {
+				cache.get(poolKey.toString(), "topics", fetchTopics);
+			}
+		});
+		
+		
 	}
 	
 	/**
 	 * Returns the pool key
 	 * @return the pool key
 	 */
-	public String key() {
+	public PoolKey key() {
 		return poolKey;
 	}
 	
@@ -257,10 +304,150 @@ public class MQ implements MessageListener, HttpSessionBindingListener {
 	}
 	
 	
+	/** Callable to return all queue info */
+	private final Callable<Map<?, ?>> fetchQueues = new Callable<Map<?, ?>>() {
+		@Override
+		public Map<String, Map<QueueAttribute, Object>> call() throws Exception {
+			final long startTime = System.currentTimeMillis();
+			try {
+				final PCFMessage[] qAttrPcfs = pcfList(CMQCFC.MQCMD_INQUIRE_Q_STATUS, 
+						new MQCFST(CMQC.MQCA_Q_NAME, "*"),
+						new MQCFIN(CMQC.MQIA_Q_TYPE, CMQC.MQQT_LOCAL)
+					);
+				final Map<String, Map<QueueAttribute, Object>> qAttrs = new ConcurrentHashMap<String, Map<QueueAttribute, Object>>(qAttrPcfs.length, 0.75f, CORES); 
+				Arrays.stream(qAttrPcfs).parallel().forEach(q -> {
+					final Map<QueueAttribute, Object> attrMap = QueueAttribute.extractQueueAttributes(MQ.this,  q);
+					final String queueName = (String)attrMap.get(QueueAttribute.NAME); 
+					qAttrs.put(queueName, attrMap);
+					cache.put(poolKey.toString(), "queues", queueName, attrMap);
+				});
+				
+				final int size = qAttrs.size();
+				final long elapsed = System.currentTimeMillis() - startTime;
+				log.info("Loaded Queue Cache, Size: {}, Elapsed: {}", size, elapsed);
+				return qAttrs;
+			} catch (Exception ex) {
+				log.error("Failed to initialize queue cache on [{}]", poolKey, ex);
+				throw ex;
+			}
+		}
+	};
+	
+	/** Callable to return all topic info */
+	private final Callable<Map<?, ?>> fetchTopics = new Callable<Map<?, ?>>() {
+		@Override
+		public Map<String, Map<TopicAttribute, Object>> call() throws Exception {
+			final long startTime = System.currentTimeMillis();
+			final PCFMessage topicInfo = new PCFMessage(CMQCFC.MQCMD_INQUIRE_TOPIC);
+			final PCFMessage topicStatus = new PCFMessage(CMQCFC.MQCMD_INQUIRE_TOPIC_STATUS);
+			final PCFMessage topicSub = new PCFMessage(CMQCFC.MQCMD_INQUIRE_TOPIC_STATUS);
+			final PCFMessage topicPub = new PCFMessage(CMQCFC.MQCMD_INQUIRE_TOPIC_STATUS);
+			try {
+				topicStatus.addParameter(new MQCFST(CMQC.MQCA_TOPIC_STRING, "#"));
+				topicStatus.addParameter(new MQCFIN(CMQCFC.MQIACF_TOPIC_STATUS_TYPE, CMQCFC.MQIACF_TOPIC_STATUS));
+				final PCFMessage[] topicInfos = pcfList(topicStatus);
+				
+				final Map<String, Map<TopicAttribute, Object>> topicAttrs = new ConcurrentHashMap<String, Map<TopicAttribute, Object>>(topicInfos.length, 0.75f, CORES);
+				Arrays.stream(topicInfos).parallel().forEach(tinfo -> {
+					final StringBuffer b = new StringBuffer();
+					final Map<TopicAttribute, Object> attrMap = 
+							TopicAttribute.extractTopicAttributes(MQ.this, CMQCFC.MQIACF_TOPIC_STATUS, tinfo);
+					for(Map.Entry<TopicAttribute, Object> entry: attrMap.entrySet()) {
+						b.append("\n\t").append(entry.getKey()).append(":[").append(entry.getValue()).append("]");
+					}
+					b.append("\n\tMsg:[").append(tinfo).append("]");
+					b.append("\n\t=========");
+					log.info(b.toString());
+
+				});
+				
+//				topicInfo.addParameter(new MQCFST(CMQC.MQCA_TOPIC_NAME, "*"));
+//				final PCFMessage[] topicInfos = pcfList(topicInfo);
+//				final Map<String, Map<TopicAttribute, Object>> topicAttrs = new ConcurrentHashMap<String, Map<TopicAttribute, Object>>(topicInfos.length, 0.75f, CORES);
+//				Arrays.stream(topicInfos).forEach(tinfo -> {
+//					final StringBuffer b = new StringBuffer();
+//					final Map<TopicAttribute, Object> attrMap = TopicAttribute.extractTopicAttributes(MQ.this, CMQCFC.MQCMD_INQUIRE_TOPIC, tinfo);
+//					final String topicName = (String)attrMap.get(TopicAttribute.NAME);
+//					final String topicString = (String)attrMap.get(TopicAttribute.TSTRING);
+//					b.append("TOPIC:  name:[").append(topicName).append("], string:[").append(topicString).append("]");
+//					for(Map.Entry<TopicAttribute, Object> entry: attrMap.entrySet()) {
+//						b.append("\n\t").append(entry.getKey()).append(":[").append(entry.getValue()).append("]");
+//					}
+//					
+//					try {
+//						final PCFMessage topicStatus = new PCFMessage(CMQCFC.MQCMD_INQUIRE_TOPIC_STATUS);
+//						topicStatus.addParameter(new MQCFST(CMQC.MQCA_TOPIC_STRING, topicString.isEmpty() ? padName(topicName) : topicString));
+//						topicStatus.addParameter(new MQCFIN(CMQCFC.MQIACF_TOPIC_STATUS_TYPE, CMQCFC.MQIACF_TOPIC_STATUS));
+//						final PCFMessage[] topicStatusResponse = pcfList(topicStatus);
+//						final Map<TopicAttribute, Object> statusMap = TopicAttribute.extractTopicAttributes(
+//								MQ.this, CMQCFC.MQCMD_INQUIRE_TOPIC_STATUS, topicStatusResponse);
+//						for(Map.Entry<TopicAttribute, Object> entry: statusMap.entrySet()) {
+//							b.append("\n\t").append(entry.getKey()).append(":[").append(entry.getValue()).append("]");
+//						}
+//					} catch (Exception x) {}
+//					log.info(b.toString());
+//
+//				});
+				
+				
+				
+//				//--
+//				topicStatus.addParameter(new MQCFST(CMQC.MQCA_TOPIC_STRING, "#"));
+//				topicStatus.addParameter(new MQCFIN(CMQCFC.MQIACF_TOPIC_STATUS_TYPE, CMQCFC.MQIACF_TOPIC_STATUS));
+//				//--
+//				topicSub.addParameter(new MQCFST(CMQC.MQCA_TOPIC_STRING, "#"));
+//				topicSub.addParameter(new MQCFIN(CMQCFC.MQIACF_TOPIC_STATUS_TYPE, CMQCFC.MQIACF_TOPIC_SUB));
+//				//--
+//				topicPub.addParameter(new MQCFST(CMQC.MQCA_TOPIC_STRING, "#"));
+//				topicPub.addParameter(new MQCFIN(CMQCFC.MQIACF_TOPIC_STATUS_TYPE, CMQCFC.MQIACF_TOPIC_PUB));
+//				
+//				
+//				
+//				final Map<Integer, PCFMessage[]> responses = new ConcurrentHashMap<Integer, PCFMessage[]>(4);
+//				final PCFMessage[] requests = new PCFMessage[] {topicInfo, topicStatus, topicSub, topicPub};
+//				
+//				final Map<String, String> topicStrings = new HashMap<String, String>(128);
+//				final CountDownLatch latch = new CountDownLatch(1);
+//				IntStream.range(0, requests.length).parallel().forEach(idx -> {
+//					final PCFMessage request = requests[idx];					
+//					final PCFMessage[] response = pcfList(requests[idx]);
+//					if(request.getCommand()==CMQCFC.MQCMD_INQUIRE_TOPIC) {
+//						final Map<TopicAttribute, Object> attrMap = TopicAttribute.extractTopicAttributes(MQ.this, CMQCFC.MQCMD_INQUIRE_TOPIC, response);
+//						final String topicName = (String)attrMap.get(TopicAttribute.TSTRING); 
+//						topicAttrs.put(topicName, attrMap);
+//						cache.put(poolKey.toString(), "topics", topicName, attrMap);
+//						latch.countDown();
+//					} else {
+//						int statusType = idx==1 ? CMQCFC.MQIACF_TOPIC_STATUS : idx==2 ? CMQCFC.MQIACF_TOPIC_SUB : CMQCFC.MQIACF_TOPIC_PUB;
+//						final Map<TopicAttribute, Object> attrMap = TopicAttribute.extractTopicAttributes(MQ.this, statusType, response);
+//						try {
+//							if(!latch.await(10, TimeUnit.SECONDS)) throw new RuntimeException("Timed out waiting for topic name lookup on [" + poolKey + "]");
+//						} catch (InterruptedException e) {
+//							throw new RuntimeException("Interrupted while waiting for topic name lookup on [" + poolKey + "]");
+//						}
+//						
+//						final String topicName = (String)attrMap.get(TopicAttribute.TSTRING); 
+//						topicAttrs.get(topicName).putAll(attrMap);
+//						
+//					}
+//				});
+//				logger.info("[{}] commands completed in [{}] ms.", responses.size(), System.currentTimeMillis() - startTime);
+//				final int size = topicAttrs.size();
+//				final long elapsed = System.currentTimeMillis() - startTime;
+//				logger.info("Loaded Topic Cache, Size: {}, Elapsed: {}", size, elapsed);
+				return topicAttrs;
+			} catch (Exception ex) {
+				log.error("Failed to initialize topic cache on [{}]", poolKey, ex);
+				throw ex;
+			}
+		}
+	};
+	
+	
 	protected PCFMessage[] pcfList(final int commandType, final PCFParameter...params) {
 		PCFMessageAgentWrapper conn = null;
 		try {
-			conn = poolManager.getConnection(poolKey);
+			conn = poolManager.getConnection(poolKey.toString());
 			final PCFMessage request = new PCFMessage(commandType);
 			for(PCFParameter p: params) {
 				request.addParameter(p);
@@ -271,6 +458,19 @@ public class MQ implements MessageListener, HttpSessionBindingListener {
 		} finally {
 			if(conn!=null) try { conn.close(); } catch (Exception x) {/* No Op */}
 		}
+	}
+	
+	protected PCFMessage[] pcfList(final PCFMessage request) {
+		PCFMessageAgentWrapper conn = null;
+		try {
+			conn = poolManager.getConnection(poolKey.toString());
+			return conn.send(request);
+		} catch (Exception ex) {
+			throw new RuntimeException("PCF Exception", ex);
+		} finally {
+			if(conn!=null) try { conn.close(); } catch (Exception x) {/* No Op */}
+		}
+		
 	}
 	
 	/**
@@ -290,7 +490,7 @@ public class MQ implements MessageListener, HttpSessionBindingListener {
 		}
 	}
 	
-	public static final String DATE_FORMAT = "yyyy-MM-dd HH:mm:ss";
+	public static final String DATE_FORMAT = "yyyy-MM-dd HH.mm.ss";
 	public static final int DATE_LENGTH = DATE_FORMAT.length();
 	static final ThreadLocal<WeakReference<SimpleDateFormat>> SDF = new ThreadLocal<WeakReference<SimpleDateFormat>>() {
 		@Override
@@ -304,7 +504,9 @@ public class MQ implements MessageListener, HttpSessionBindingListener {
 	 * @param cs The string date
 	 * @return The java date
 	 */
-	public static Date fromStringy(final CharSequence cs) {
+	public static Date fromStringy(final CharSequence stringy) {
+		final String s = stringy.toString().trim();
+		if(s.isEmpty()) return null;
 		WeakReference<SimpleDateFormat> sdfRef = SDF.get();		
 		SimpleDateFormat sdf = sdfRef.get();
 		if(sdf==null) {
@@ -312,9 +514,9 @@ public class MQ implements MessageListener, HttpSessionBindingListener {
 			sdf = SDF.get().get();
 		}
 		try {
-			return sdf.parse(cs.toString().trim());
+			return sdf.parse(s.toString().trim());
 		} catch (ParseException pe) {
-			throw new RuntimeException("Failed to parse date [" + cs + "]");
+			throw new RuntimeException("Failed to parse date [" + stringy + "]");
 		}
 	}
 	
@@ -359,7 +561,7 @@ public class MQ implements MessageListener, HttpSessionBindingListener {
 	 */
 	public Map<QueueAttribute, Object> queueAttrs(final String queueName) {
 		final PCFMessage[] p = pcfList(CMQCFC.MQCMD_INQUIRE_Q_STATUS, 
-				new MQCFST(CMQC.MQCA_Q_NAME, queueName)
+				new MQCFST(CMQC.MQCA_Q_NAME, padName(queueName))
 			);
 		try {
 			return QueueAttribute.extractQueueAttributes(this, p);
@@ -431,6 +633,31 @@ public class MQ implements MessageListener, HttpSessionBindingListener {
 			return attrMap;
 		} catch (Exception ex) {
 			throw new RuntimeException("Failed to get subscription attributes for [" + subName.trim() + "]", ex);
+		}		
+	}
+	
+	/**
+	 * Returns the subscription attributes for the named subscription
+	 * @param subName The subscription name
+	 * @return The subscription attributes in a name/value map
+	 */
+	public Map<SubscriptionAttribute, Object> subscriptionAttrs(final byte[] subId) {
+		try {
+			PCFMessage[] p = pcfList(CMQCFC.MQCMD_INQUIRE_SUBSCRIPTION, 
+					new MQCFBS(CMQCFC.MQBACF_SUB_ID, subId) 
+			);
+			final Map<SubscriptionAttribute, Object> attrMap = SubscriptionAttribute.extractSubscriptionAttributes(this, CMQCFC.MQCMD_INQUIRE_SUBSCRIPTION, p);
+			final String subName = (String)attrMap.get(SubscriptionAttribute.NAME);
+			attrMap.putAll(
+					SubscriptionAttribute.extractSubscriptionAttributes(
+						this, 
+						CMQCFC.MQCMD_INQUIRE_SUB_STATUS, 
+						pcfList(CMQCFC.MQCMD_INQUIRE_SUB_STATUS, new MQCFST(CMQCFC.MQCACF_SUB_NAME, subName)
+					)
+			));
+			return attrMap;
+		} catch (Exception ex) {
+			throw new RuntimeException("Failed to get subscription attributes for [" + DatatypeConverter.printHexBinary(subId) + "]", ex);
 		}		
 	}
 	
@@ -576,11 +803,13 @@ public class MQ implements MessageListener, HttpSessionBindingListener {
 		};
 	}
 	
-	public Map<String, String> getQueueNames(final Pattern excludeFilter, final Pattern includeFilter) {
+	
+	
+	public Map<String, String> getQueueNames(final Pattern excludeFilter, final Pattern includeFilter) {		
 		PCFMessage p = pcfList(CMQCFC.MQCMD_INQUIRE_Q_NAMES, 
 				new MQCFST(CMQC.MQCA_Q_NAME, "*"),
 				new MQCFIN(CMQC.MQIA_Q_TYPE, CMQC.MQQT_LOCAL)
-			)[0];
+			)[0];		
 		try {
 			final String[] queueNames = p.getStringListParameterValue(CMQCFC.MQCACF_Q_NAMES);
 			final Map<String, String> map = new HashMap<String, String>(queueNames.length);
@@ -637,6 +866,23 @@ public class MQ implements MessageListener, HttpSessionBindingListener {
 		} catch (Exception ex) {
 			throw new RuntimeException("Failed to extract topic names", ex);
 		}
+	}
+	
+	/**
+	 * Pads the passed name out to the max size of a queue name,
+	 * unless the name is wildcarded, in which case the trimmed value is returned.
+	 * @param queueName The name to pad
+	 * @return the padded queue name 
+	 */
+	public static String padName(final String queueName) {
+		if(queueName==null || queueName.trim().isEmpty()) throw new IllegalArgumentException("The passed queue name was null or empty");		
+		final StringBuilder q = new StringBuilder(queueName.trim());
+		
+		if(q.charAt(q.length()-1)=='*') return q.toString();
+		final int toPad = CMQC.MQ_Q_NAME_LENGTH - queueName.length();
+		final char[] padding = new char[toPad];
+		Arrays.fill(padding, ' ');
+		return q.append(padding).toString();
 	}
 	
 	/**

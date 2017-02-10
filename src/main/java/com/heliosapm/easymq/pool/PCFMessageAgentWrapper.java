@@ -36,12 +36,10 @@ public class PCFMessageAgentWrapper implements Closeable {
 	private final PCFMessageAgent pcf;
 	/** The queue manager name */
 	private final String queueManagerName;
-	/** The wrapper key */
-	public final String key;
+	/** The wrapper's pool key */
+	public final PoolKey key;
 	/** Indicates if this wrapper is pooled */
 	private final boolean pooled;
-	/** The key parsing regex */
-	public static final Pattern KEY_PATTERN = Pattern.compile("(.*?)@(.*?):(\\d+)");
 	/** Flag indicating if the pcf expiry has been set */
 	private static final AtomicBoolean expirySet = new AtomicBoolean(false);
 	/** The system property to enable or disable pcf message expiry */
@@ -60,7 +58,7 @@ public class PCFMessageAgentWrapper implements Closeable {
 	 * @param pooled true if this agent is pooled, false otherwise
 	 */
 	public PCFMessageAgentWrapper(final String host, final int port, final String channel, final boolean pooled) {
-		key = key(host, port, channel);
+		key = PoolKey.poolKey(host, channel, port);
 		try {
 			pcf = new PCFMessageAgent(host, port, channel);
 			queueManagerName = pcf.getQManagerName();
@@ -87,14 +85,9 @@ public class PCFMessageAgentWrapper implements Closeable {
 	 * @param pooled true if this agent is pooled, false otherwise
 	 * @return The created and connected message agent
 	 */
-	public static PCFMessageAgentWrapper fromKey(final String key, final boolean pooled) {
-		if(key==null || key.trim().isEmpty()) throw new IllegalArgumentException("The passed key was null or empty");
-		final Matcher m = KEY_PATTERN.matcher(key.trim());
-		if(!m.matches()) throw new IllegalArgumentException("Cannot parse the key [" + key + "]");
-		final String host = m.group(2);
-		final String channel = m.group(1);
-		final int port = Integer.parseInt(m.group(3));
-		return new PCFMessageAgentWrapper(host, port, channel, pooled);
+	public static PCFMessageAgentWrapper fromKey(final PoolKey poolKey, final boolean pooled) {
+		if(poolKey==null) throw new IllegalArgumentException("The passed pool key was null");
+		return new PCFMessageAgentWrapper(poolKey.host, poolKey.port, poolKey.channel, pooled);
 	}
 	
 	/**
@@ -104,37 +97,9 @@ public class PCFMessageAgentWrapper implements Closeable {
 	 * @return The created and connected message agent
 	 */
 	public static PCFMessageAgentWrapper fromKey(final String key) {
-		return fromKey(key, false);
+		return fromKey(PoolKey.poolKey(key), false);
 	}
 	
-	
-	
-	
-	/**
-	 * Generates a message agent key in the form <b><code>&lt;channel&gt;@&lt;host&gt;:&lt;port&gt;</code></b>.
-	 * e.g. <b><code>SYSTEM.DEF.SVRCONN@wmq-server-05:1414</code></b>. 
-	 * @param host the hostname or IP address where the queue manager resides
-	 * @param port the port on which the queue manager listens for incoming channel connections
-	 * @param channel the client channel to use for the connection
-	 * @return the key
-	 */
-	public static String key(final String host, final int port, final String channel) {
-		if(host==null || host.trim().isEmpty()) throw new IllegalArgumentException("The passed host was null or empty");		
-		if(channel==null || channel.trim().isEmpty()) throw new IllegalArgumentException("The passed channel was null or empty");
-		if(port < 1 || port > 65535) throw new IllegalArgumentException("Invalid port:" + port);
-		return new StringBuilder(channel.trim()).append("@").append(host.trim()).append(":").append(port).toString();
-	}
-		
-	/**
-	 * Generates a message agent key in JSON form.
-	 * @param host the hostname or IP address where the queue manager resides
-	 * @param port the port on which the queue manager listens for incoming channel connections
-	 * @param channel the client channel to use for the connection
-	 * @return the key in json format
-	 */
-	public static String json(final String host, final int port, final String channel) {
-		return String.format("{\"host\":\"%s\",\"port\":\"%s\",\"channel\":\"%s\"}", host, port, channel);
-	}
 	/**
 	 * Indicates if the system property to enable pcf message expiry is set to false
 	 * @return true if the expiry property is set to false
@@ -260,7 +225,7 @@ public class PCFMessageAgentWrapper implements Closeable {
 	 */
 	@Override
 	public String toString() {
-		return key;
+		return "PCF:" + key.toString();
 	}
 	
 	/**

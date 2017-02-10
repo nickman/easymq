@@ -12,6 +12,7 @@
 // see <http://www.gnu.org/licenses/>.
 package com.heliosapm.easymq.commands;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.EnumMap;
@@ -37,6 +38,30 @@ import com.ibm.mq.pcf.PCFMessage;
  */
 
 public enum TopicAttribute implements AttributeExtractor {
+	NAME(String.class, CMQCFC.MQCMD_INQUIRE_TOPIC) {
+		@Override
+		public Object extract(final MQ mq, final PCFMessage... messages) throws PCFException {
+			return messages[0].getStringParameterValue(CMQC.MQCA_TOPIC_NAME).trim();
+		}		
+	},
+	TSTRING(String.class, CMQCFC.MQCMD_INQUIRE_TOPIC, CMQCFC.MQIACF_TOPIC_STATUS) {
+		@Override
+		public Object extract(final MQ mq, final PCFMessage... messages) throws PCFException {
+			return messages[0].getStringParameterValue(CMQC.MQCA_TOPIC_STRING);
+		}		
+	},
+	DESC(String.class, CMQCFC.MQCMD_INQUIRE_TOPIC) {
+		@Override
+		public Object extract(final MQ mq, final PCFMessage... messages) throws PCFException {
+			return messages[0].getStringParameterValue(CMQC.MQCA_TOPIC_DESC);
+		}		
+	},
+	TYPE(String.class, CMQCFC.MQCMD_INQUIRE_TOPIC) {
+		@Override
+		public Object extract(final MQ mq, final PCFMessage... messages) throws PCFException {
+			return messages[0].getIntParameterValue(CMQC.MQIA_TOPIC_TYPE)==CMQC.MQTOPT_LOCAL ? "LOCAL" : "CLUSTER";
+		}		
+	},
 	PUBLISHER_COUNT(Integer.class, CMQCFC.MQIACF_TOPIC_STATUS){
 		@Override
 		public Object extract(final MQ mq, final PCFMessage... messages) throws PCFException {
@@ -86,7 +111,7 @@ public enum TopicAttribute implements AttributeExtractor {
 			return conns;
 		}
 	},
-	SUB_COMM_INFO(String[].class, CMQCFC.MQIACF_TOPIC_STATUS) {
+	SUB_COMM_INFO(String.class, CMQCFC.MQIACF_TOPIC_STATUS, CMQCFC.MQCMD_INQUIRE_TOPIC) {
 		@Override
 		public Object extract(final MQ mq, final PCFMessage... messages) throws PCFException {
 			final int len = messages.length;
@@ -94,7 +119,7 @@ public enum TopicAttribute implements AttributeExtractor {
 			for(int i = 0; i < len; i++) {
 				conns[i] = messages[i].getStringParameterValue(CMQC.MQCA_COMM_INFO_NAME);
 			}
-			return conns;				
+			return String.join(",", conns);				
 		}
 	},
 	SUB_RESUME_DATE(Map.class, CMQCFC.MQIACF_TOPIC_SUB) {
@@ -169,10 +194,17 @@ public enum TopicAttribute implements AttributeExtractor {
 	public static final Set<TopicAttribute> VALUE_SET = Collections.unmodifiableSet(EnumSet.allOf(TopicAttribute.class));
 	
 	
+	/**
+	 * Extracts topic attributes from the passed array of PCFMessages
+	 * @param mq The MQ instance
+	 * @param statusType The status type or -1 for all
+	 * @param messages The PCFMessages to extract from
+	 * @return a map of topic attributes
+	 */
 	public static Map<TopicAttribute, Object> extractTopicAttributes(final MQ mq, final int statusType, final PCFMessage...messages) {
 		final EnumMap<TopicAttribute, Object> map = new EnumMap<TopicAttribute, Object>(TopicAttribute.class);
 		for(final TopicAttribute ta : values) {
-			if(ta.statusType != statusType) continue;
+			if(!ta.statusTypeMatch(statusType)) continue;
 			try {
 				map.put(ta, ta.extract(mq, messages));
 			} catch (PCFException pex) {
@@ -182,12 +214,18 @@ public enum TopicAttribute implements AttributeExtractor {
 		return map;
 	}
 	
-	private TopicAttribute(final Class<?> type, final int statusType) {
+	public boolean statusTypeMatch(final int type) {
+		if(type==-1) return true;
+		return Arrays.binarySearch(statusTypes, type) >= 0;
+	}
+	
+	private TopicAttribute(final Class<?> type, final int...statusTypes) {
 		this.type = type;
-		this.statusType = statusType;
+		this.statusTypes = statusTypes;
+		Arrays.sort(this.statusTypes);
 	}
 	
 	public final Class<?> type;
-	public final int statusType;
+	public final int[] statusTypes;
 
 }

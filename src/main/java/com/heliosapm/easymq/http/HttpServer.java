@@ -174,7 +174,7 @@ public class HttpServer {
 			final HttpServletResponse raw = res.raw();
 			raw.setContentType(JSON_TYPE);
 			raw.setStatus(200);
-			raw.setHeader(MQ_KEY_HEADER, mq.key());
+			raw.setHeader(MQ_KEY_HEADER, mq.key().toString());
 			raw.setHeader(MQ_POOLNAME_HEADER, mq.poolName());
 			JSONOps.serializeOut(object, raw.getOutputStream());
 			return OK_200;

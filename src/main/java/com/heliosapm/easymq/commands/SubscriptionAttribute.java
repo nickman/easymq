@@ -34,6 +34,26 @@ import com.ibm.mq.pcf.PCFMessage;
  */
 
 public enum SubscriptionAttribute implements AttributeExtractor {
+	NAME(String.class, CMQCFC.MQCMD_INQUIRE_SUBSCRIPTION) {
+		@Override
+		public Object extract(final MQ mq, final PCFMessage... messages) throws PCFException {
+			try {
+				return messages[0].getStringParameterValue(CMQCFC.MQCACF_SUB_NAME);
+			} catch (Exception ex) {
+				return null;
+			}
+		}		
+	},
+	ID(byte[].class, CMQCFC.MQCMD_INQUIRE_SUBSCRIPTION) {
+		@Override
+		public Object extract(final MQ mq, final PCFMessage... messages) throws PCFException {
+			try {
+				return messages[0].getBytesParameterValue(CMQCFC.MQBACF_SUB_ID);
+			} catch (Exception ex) {
+				return null;
+			}
+		}		
+	},	
 	DESTINATION(String.class, CMQCFC.MQCMD_INQUIRE_SUBSCRIPTION){
 		@Override
 		public Object extract(final MQ mq, final PCFMessage... messages) throws PCFException {

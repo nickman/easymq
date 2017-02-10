@@ -39,7 +39,7 @@ public class SubPool {
 	/** The pcf response message expiration time in seconds */
 	final int pcfExpiry;
 	/** The pool key for this sub pool */
-	final String key;
+	final PoolKey key;
 	
 	
 	/**
@@ -64,7 +64,18 @@ public class SubPool {
 		this.port = port;
 		this.pcfWait = pcfWait;
 		this.pcfExpiry = pcfExpiry;
-		key = PCFMessageAgentWrapper.key(host, port, channel);
+		key = PoolKey.poolKey(host, channel, port);
+	}
+	
+	/**
+	 * Creates a sub pool from a pool key
+	 * @param key The key
+	 * @return the sub pool
+	 */
+	public static SubPool fromKey(final String key) {
+		if(key==null || key.trim().isEmpty()) throw new IllegalArgumentException("The key was null or empty");
+		final PoolKey p = PoolKey.poolKey(key.trim());
+		return new SubPool(p.toString(), p.host, p.channel, p.port, PCFMessageAgentWrapper.DEFAULT_PCF_WAIT, PCFMessageAgentWrapper.DEFAULT_PCF_EXPIRY);
 	}
 	
 	/**
@@ -72,15 +83,11 @@ public class SubPool {
 	 * @param key The key
 	 * @return the sub pool
 	 */
-	public static SubPool fromKey(final String key) {
-		if(key==null || key.trim().isEmpty()) throw new IllegalArgumentException("The key was null or empty");
-		final Matcher m = PCFMessageAgentWrapper.KEY_PATTERN.matcher(key.trim());
-		if(!m.matches()) throw new IllegalArgumentException("The key [" + key + "] could not be parsed");
-		final String host = m.group(2);
-		final String channel = m.group(1);
-		final int port = Integer.parseInt(m.group(3));
-		return new SubPool(PCFMessageAgentWrapper.key(host, port, channel), host, channel, port, PCFMessageAgentWrapper.DEFAULT_PCF_WAIT, PCFMessageAgentWrapper.DEFAULT_PCF_EXPIRY);
+	public static SubPool fromKey(final PoolKey p) {
+		if(p==null) throw new IllegalArgumentException("The key was null");
+		return new SubPool(p.toString(), p.host, p.channel, p.port, PCFMessageAgentWrapper.DEFAULT_PCF_WAIT, PCFMessageAgentWrapper.DEFAULT_PCF_EXPIRY);
 	}
+
 	
 	/**
 	 * {@inheritDoc}
@@ -88,7 +95,7 @@ public class SubPool {
 	 */
 	@Override
 	public String toString() {
-		return key;
+		return "SubPool:" + key.toString();
 	}
 
 	public String getPoolName() {
@@ -115,7 +122,7 @@ public class SubPool {
 		return pcfExpiry;
 	}
 
-	public String getKey() {
+	public PoolKey getPoolKey() {
 		return key;
 	}
 	

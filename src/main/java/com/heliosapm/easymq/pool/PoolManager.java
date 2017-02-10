@@ -12,9 +12,6 @@
 // see <http://www.gnu.org/licenses/>.
 package com.heliosapm.easymq.pool;
 
-import java.io.File;
-import java.net.MalformedURLException;
-import java.net.URL;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -27,6 +24,7 @@ import org.slf4j.LoggerFactory;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.heliosapm.easymq.MQConfig;
+import com.heliosapm.easymq.cache.CacheService;
 import com.heliosapm.easymq.json.JSONOps;
 
 /**
@@ -49,7 +47,7 @@ public class PoolManager {
 	/** The pool configuration */
 	protected final GenericKeyedObjectPoolConfig poolConfig;
 	/** The pool */
-	protected final GenericKeyedObjectPool<String, PCFMessageAgentWrapper> pool;
+	protected final GenericKeyedObjectPool<PoolKey, PCFMessageAgentWrapper> pool;
 	/** A set of installed pool keys */
 	protected final Set<String> poolKeys = new CopyOnWriteArraySet<String>();
 	/** A map of pool keys keyed by the pool name */
@@ -83,7 +81,7 @@ public class PoolManager {
 	private PoolManager() {
 		final JsonNode rootNode = MQConfig.getInstance().getRootNode();
 		poolConfig = JSONOps.parseToObject(rootNode.get("poolconfig"), GenericKeyedObjectPoolConfig.class);
-		pool = new GenericKeyedObjectPool<String, PCFMessageAgentWrapper>(PCFAgentPooledObjectFactory.INSTANCE, poolConfig);
+		pool = new GenericKeyedObjectPool<PoolKey, PCFMessageAgentWrapper>(PCFAgentPooledObjectFactory.INSTANCE, poolConfig);
 		log.info("PCFMessageAgent Pool Started");
 		final JsonNode poolDefs = rootNode.get("pools");
 		for(JsonNode poolDef: poolDefs) {
@@ -106,7 +104,7 @@ public class PoolManager {
 	 */
 	public PCFMessageAgentWrapper getConnection(final String poolKey) {
 		if(poolKey==null || poolKey.trim().isEmpty()) throw new IllegalArgumentException("The key was null or empty");
-		final String _key = poolKey.trim();
+		final PoolKey _key = PoolKey.poolKey(poolKey.trim());
 		if(!poolKeys.contains(_key)) {
 			synchronized(poolKeys) {
 				if(!poolKeys.contains(_key)) {
@@ -149,25 +147,38 @@ public class PoolManager {
 	}
 	
 	/**
+	 * Installs a new sub pool from a pool key
+	 * @param key The pool key
+	 * @return true if the pool was installed, false otherwise
+	 */
+	public boolean installSubPool(final PoolKey key) {
+		return installSubPool(SubPool.fromKey(key));
+	}
+	
+	
+	/**
 	 * Installs a new sub pool
 	 * @param subPool The sub pool to install
 	 * @return true if the pool was installed, false otherwise
 	 */
 	public boolean installSubPool(final SubPool subPool) {
-		if(poolKeys.add(subPool.key)) {
+		if(subPool==null) throw new IllegalArgumentException("The passed sub pool was null");
+		final String pk = subPool.key.toString();
+		if(poolKeys.add(pk)) {
 			log.info("Installing sub pool [{}]...", subPool.poolName);
 			try {
 				pool.preparePool(subPool.key);
-				poolNameKeys.put(subPool.poolName, subPool.key);
-				poolKeyNames.put(subPool.key, subPool.poolName);
+				poolNameKeys.put(subPool.poolName, pk);
+				poolKeyNames.put(pk, subPool.poolName);
 				log.info("SubPool [{}] installed", subPool.poolName);
+				CacheService.getInstance().getCachesForMQInstance(subPool.key.toString());
 				return true;
 			} catch (Exception ex) {
 				poolKeys.remove(subPool.key);
 				log.error("Failed to install pool [{}]", subPool.poolName, ex);				
 			}
 		} else {
-			log.info("SubPool with key [{}] and name [{}] is already installed", subPool.key, subPool.poolName);
+			log.debug("SubPool with key [{}] and name [{}] is already installed", subPool.key, subPool.poolName);
 		}
 		return false;
 	}

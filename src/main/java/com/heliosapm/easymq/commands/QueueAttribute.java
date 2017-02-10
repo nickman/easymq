@@ -18,6 +18,7 @@ import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 import com.heliosapm.easymq.MQ;
 
@@ -28,13 +29,26 @@ import com.ibm.mq.pcf.PCFMessage;
 
 /**
  * <p>Title: QueueAttribute</p>
- * <p>Description: </p> 
+ * <p>Description: Functional enumeration of MQ queue attributes</p> 
  * <p>Company: Helios Development Group LLC</p>
  * @author Whitehead (nwhitehead AT heliosdev DOT org)
  * <p><code>com.heliosapm.easymq.commands.QueueAttribute</code></p>
  */
 
 public enum QueueAttribute implements AttributeExtractor {
+	NAME(String.class) {
+		@Override
+		public Object extract(final MQ mq, final PCFMessage... messages) throws PCFException {
+			return messages[0].getStringParameterValue(CMQC.MQCA_Q_NAME).trim();
+		}
+	},
+	ADMIN(boolean.class) {
+		final Pattern NON_ADMIN_QUEUES = Pattern.compile("SYSTEM\\..*||AMQ\\..*", Pattern.CASE_INSENSITIVE);
+		@Override
+		public Object extract(MQ mq, PCFMessage... messages) throws PCFException {
+			return !NON_ADMIN_QUEUES.matcher(messages[0].getStringParameterValue(CMQC.MQCA_Q_NAME)).matches();
+		}
+	},
 	QUEUE_DEPTH(Integer.class){
 		@Override
 		public Object extract(final MQ mq, final PCFMessage... messages) throws PCFException {

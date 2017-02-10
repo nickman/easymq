@@ -9,14 +9,15 @@
 	<properties>
   	<!-- Misc -->
  		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
- 		<compiler-source.version>1.8</compiler-source.version>
- 		<compiler-target.version>1.8</compiler-target.version>
+ 		<maven.compiler.source>1.8</maven.compiler.source>
+ 		<maven.compiler.target>1.8</maven.compiler.target>
  		<!-- Dependencies -->
  		<junit.version>4.12</junit.version>		
 		<slf4j.version>1.7.7</slf4j.version>
 		<logback.version>1.0.13</logback.version>
 		<mq.version>8.0.0.5</mq.version>
-		<pools.version>2.4.2</pools.version>		
+		<pools.version>2.4.2</pools.version>
+		<guava.version>21.0</guava.version>		
 		<jackson.version>2.7.5</jackson.version>
 		<metrics.version>3.1.2</metrics.version>
 		<sparkjava.version>2.5.4</sparkjava.version>
@@ -50,6 +51,11 @@
 		  <version>${jms.version}</version>
 		</dependency>
 		
+		<dependency>
+		  <groupId>com.google.guava</groupId>
+		  <artifactId>guava</artifactId>
+		  <version>${guava.version}</version>
+		</dependency>
 
 		<dependency>
 		  <groupId>com.ibm.mq</groupId>
@@ -156,8 +162,8 @@
 		<plugin>
 			<groupId>org.apache.maven.plugins</groupId>
 			<artifactId>maven-eclipse-plugin</artifactId>
-			<version>${eclipse-plugin.version}</version>
-			<configuration>
+			<version>${eclipse-plugin.version}</version>			
+			<configuration>				
 			    <downloadJavadocs>true</downloadJavadocs>
 			    <downloadSources>true</downloadSources>
 			    <classpathContainers>
@@ -172,7 +178,7 @@
 				<configuration>
 <!-- 					<source>${compiler-source.version}</source> -->
 <!-- 					<target>${compiler-target.version}</target> -->
-					<source>1.6</source>
+					<source>1.8</source>
 					<target>${compiler-target.version}</target>
 
 				</configuration>

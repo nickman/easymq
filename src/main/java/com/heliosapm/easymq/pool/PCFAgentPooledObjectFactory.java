@@ -26,7 +26,7 @@ import com.ibm.mq.pcf.PCFMessageAgent;
  * <p><code>com.heliosapm.easymq.PCFAgentPooledObjectFactory</code></p>
  */
 
-public class PCFAgentPooledObjectFactory extends BaseKeyedPooledObjectFactory<String, PCFMessageAgentWrapper> {
+public class PCFAgentPooledObjectFactory extends BaseKeyedPooledObjectFactory<PoolKey, PCFMessageAgentWrapper> {
 	/** Shareable instance */
 	public static final PCFAgentPooledObjectFactory INSTANCE = new PCFAgentPooledObjectFactory();
 	
@@ -37,7 +37,7 @@ public class PCFAgentPooledObjectFactory extends BaseKeyedPooledObjectFactory<St
 	 * @see org.apache.commons.pool2.BaseKeyedPooledObjectFactory#create(java.lang.Object)
 	 */
 	@Override
-	public PCFMessageAgentWrapper create(final String key) throws Exception {
+	public PCFMessageAgentWrapper create(final PoolKey key) throws Exception {
 		return PCFMessageAgentWrapper.fromKey(key, true);
 	}
 
@@ -51,7 +51,7 @@ public class PCFAgentPooledObjectFactory extends BaseKeyedPooledObjectFactory<St
 	}
 	
 	@Override
-	public boolean validateObject(final String key, final PooledObject<PCFMessageAgentWrapper> p) {
+	public boolean validateObject(final PoolKey key, final PooledObject<PCFMessageAgentWrapper> p) {
 		try {
 			final PCFMessageAgentWrapper wrapper = p.getObject();
 			final PCFMessageAgent agent = wrapper.getRawAgent();
