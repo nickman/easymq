@@ -12,15 +12,15 @@
  		<maven.compiler.source>1.8</maven.compiler.source>
  		<maven.compiler.target>1.8</maven.compiler.target>
  		<!-- Dependencies -->
- 		<junit.version>4.12</junit.version>		
+ 		<junit.version>4.13.2</junit.version>		
 		<slf4j.version>1.7.7</slf4j.version>
-		<logback.version>1.0.13</logback.version>
+		<logback.version>1.2.5</logback.version>
 		<mq.version>8.0.0.5</mq.version>
 		<pools.version>2.4.2</pools.version>
-		<guava.version>21.0</guava.version>		
-		<jackson.version>2.7.5</jackson.version>
+		<guava.version>30.1.1-jre</guava.version>		
+		<jackson.version>2.12.5</jackson.version>
 		<metrics.version>3.1.2</metrics.version>
-		<sparkjava.version>2.5.4</sparkjava.version>
+		<sparkjava.version>2.9.3</sparkjava.version>
 		<jms.version>2.0.1</jms.version>
 		<!-- Plugin Versions -->
 		<jar-plugin.version>2.3</jar-plugin.version>
